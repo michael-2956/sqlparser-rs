@@ -528,11 +528,11 @@ impl Dialect for PostgreSqlDialect {
                     } else if parser.parse_keywords(&[Keyword::NOT, Keyword::UNKNOWN]) {
                         Ok(Expr::IsNotUnknown(Box::new(expr.to_owned())))
                     } else if parser.parse_keywords(&[Keyword::DISTINCT, Keyword::FROM]) {
-                        let expr2 = some_q!(parser.parse_expr());
+                        let expr2 = some_q!(parser.parse_subexpr(Self::IS_PREC));
                         Ok(Expr::IsDistinctFrom(Box::new(expr.to_owned()), Box::new(expr2)))
                     } else if parser.parse_keywords(&[Keyword::NOT, Keyword::DISTINCT, Keyword::FROM])
                     {
-                        let expr2 = some_q!(parser.parse_expr());
+                        let expr2 = some_q!(parser.parse_subexpr(Self::IS_PREC));
                         Ok(Expr::IsNotDistinctFrom(Box::new(expr.to_owned()), Box::new(expr2)))
                     } else {
                         parser.expected(
@@ -644,7 +644,7 @@ impl Dialect for PostgreSqlDialect {
             Ok(Expr::JsonAccess {
                 left: Box::new(expr.to_owned()),
                 operator,
-                right: Box::new(some_q!(parser.parse_expr())),
+                right: Box::new(some_q!(parser.parse_subexpr(Self::OTHER_OPERATOR_PREC))),
             })
         } else {
             // Can only happen if `get_next_precedence` got out of sync with this function

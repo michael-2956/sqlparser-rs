@@ -1,1 +1,1 @@
-select not 1 in (1, 2, 3);
+select NULL IS DISTINCT FROM NULL IS NULL;
