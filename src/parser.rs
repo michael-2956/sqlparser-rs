@@ -565,6 +565,8 @@ impl<'a> Parser<'a> {
         Ok(expr)
     }
 
+    /// parse interval expression value, like the '1:1:1.1' in
+    /// `INTERVAL '1:1:1.1' HOUR (5) TO SECOND (5)`
     pub fn parse_interval_expr(&mut self) -> Result<Expr, ParserError> {
         let precedence = 0;
         let mut expr = self.parse_prefix()?;
@@ -583,7 +585,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Get the precedence of the next token
-    /// With AND, OR, and XOR
+    /// With AND, OR, and XOR returning 0 precedence
     pub fn get_next_interval_precedence(&self) -> Result<u8, ParserError> {
         let token = self.peek_token();
 
@@ -1613,7 +1615,13 @@ impl<'a> Parser<'a> {
             Token::Mod => Some(BinaryOperator::Modulo),
             Token::StringConcat => Some(BinaryOperator::StringConcat),
             Token::Pipe => Some(BinaryOperator::BitwiseOr),
-            Token::Caret => Some(BinaryOperator::BitwiseXor),
+            Token::Caret => {
+                if dialect_of!(self is PostgreSqlDialect) {
+                    Some(BinaryOperator::PGExp)
+                } else {
+                    Some(BinaryOperator::BitwiseXor)
+                }
+            }
             Token::Ampersand => Some(BinaryOperator::BitwiseAnd),
             Token::Div => Some(BinaryOperator::Divide),
             Token::ShiftLeft if dialect_of!(self is PostgreSqlDialect | GenericDialect) => {
