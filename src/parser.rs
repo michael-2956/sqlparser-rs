@@ -41,6 +41,7 @@ pub enum ParserError {
 }
 
 // Use `Parser::expected` instead, if possible
+#[macro_export]
 macro_rules! parser_err {
     ($MSG:expr) => {
         Err(ParserError::ParserError($MSG.to_string()))
@@ -2215,7 +2216,7 @@ impl<'a> Parser<'a> {
     /// Run a parser method `f`, reverting back to the current position
     /// if unsuccessful.
     #[must_use]
-    fn maybe_parse<T, F>(&mut self, mut f: F) -> Option<T>
+    pub fn maybe_parse<T, F>(&mut self, mut f: F) -> Option<T>
     where
         F: FnMut(&mut Parser) -> Result<T, ParserError>,
     {
@@ -4140,7 +4141,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_introduced_string_value(&mut self) -> Result<Value, ParserError> {
+    pub fn parse_introduced_string_value(&mut self) -> Result<Value, ParserError> {
         let next_token = self.next_token();
         let location = next_token.location;
         match next_token.token {

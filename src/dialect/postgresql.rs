@@ -10,10 +10,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::ast::{CommentObject, Statement};
+use crate::ast::{CommentObject, Statement, DataType, Expr, Function, ObjectName, UnaryOperator, Ident};
 use crate::dialect::Dialect;
 use crate::keywords::Keyword;
 use crate::parser::{Parser, ParserError};
+use crate::parser_err;
 use crate::tokenizer::Token;
 
 #[derive(Debug)]
@@ -28,9 +29,8 @@ impl PostgreSqlDialect {
     const DOUBLE_COLON_TYPECAST_PREC: u8 = 22;
     /// [ ]	    array element selection
     const BRACKET_ARRAY_ELEMENT_PREC: u8 = 21;
-    //  + -	unary plus, unary minus. It is supposed that parse_prefix parses
-    // this out without needing to call get_next_precedence
-    // const UNARY_PLUS_MINUS_PREC: u8 = 20;
+    /// + -	    unary plus, unary minus. It is supposed that parse_prefix parses
+    const UNARY_PLUS_MINUS_PREC: u8 = 20;
     /// ^	    exponentiation
     const EXPONENTIATION_PREC: u8 = 19;
     /// * / %   multiplication, division, modulo
@@ -51,6 +51,25 @@ impl PostgreSqlDialect {
     const AND_PREC: u8 = 11;
     /// OR	    logical disjunction
     const OR_PREC: u8 = 10;
+}
+
+// Returns a successful result if the optional expression is some
+macro_rules! return_some_ok_if_some {
+    ($e:expr) => {{
+        if let Some(v) = $e {
+            return Some(Ok(v));
+        }
+    }};
+}
+
+// Returns a Some(Err) if the Result is Err
+macro_rules! some_q {
+    ($e:expr) => {{
+        match $e {
+            Ok(val) => val,
+            Err(err) => return Some(Err(err)),
+        }
+    }};
 }
 
 impl Dialect for PostgreSqlDialect {
@@ -139,6 +158,223 @@ impl Dialect for PostgreSqlDialect {
             | Token::AtAt => Self::OTHER_OPERATOR_PREC,
             _ => Self::BASE_PREC,
         }))
+    }
+
+    fn parse_prefix(&self, parser: &mut Parser) -> Option<Result<crate::ast::Expr, ParserError>> {
+        // PostgreSQL allows any string literal to be preceded by a type name, indicating that the
+        // string literal represents a literal of that type. Some examples:
+        //
+        //      DATE '2020-05-20'
+        //      TIMESTAMP WITH TIME ZONE '2020-05-20 7:43:54'
+        //      BOOL 'true'
+        //
+        // The first two are standard SQL, while the latter is a PostgreSQL extension. Complicating
+        // matters is the fact that INTERVAL string literals may optionally be followed by special
+        // keywords, e.g.:
+        //
+        //      INTERVAL '7' DAY
+        //
+        // Note also that naively `SELECT date` looks like a syntax error because the `date` type
+        // name is not followed by a string literal, but in fact in PostgreSQL it is a valid
+        // expression that should parse as the column name "date".
+        return_some_ok_if_some!(parser.maybe_parse(|parser| {
+            match parser.parse_data_type()? {
+                DataType::Interval => parser.parse_interval(),
+                // PostgreSQL allows almost any identifier to be used as custom data type name,
+                // and we support that in `parse_data_type()`. But unlike Postgres we don't
+                // have a list of globally reserved keywords (since they vary across dialects),
+                // so given `NOT 'a' LIKE 'b'`, we'd accept `NOT` as a possible custom data type
+                // name, resulting in `NOT 'a'` being recognized as a `TypedString` instead of
+                // an unary negation `NOT ('a' LIKE 'b')`. To solve this, we don't accept the
+                // `type 'string'` syntax for the custom data types at all.
+                DataType::Custom(..) => parser_err!("dummy"),
+                data_type => Ok(Expr::TypedString {
+                    data_type,
+                    value: parser.parse_literal_string()?,
+                }),
+            }
+        }));
+
+        let next_token = parser.next_token();
+        let expr = some_q!(match next_token.token {
+            Token::Word(w) => match w.keyword {
+                Keyword::TRUE | Keyword::FALSE | Keyword::NULL => {
+                    parser.prev_token();
+                    Ok(Expr::Value(some_q!(parser.parse_value())))
+                }
+                Keyword::CURRENT_CATALOG
+                | Keyword::CURRENT_USER
+                | Keyword::SESSION_USER
+                | Keyword::USER =>
+                {
+                    Ok(Expr::Function(Function {
+                        name: ObjectName(vec![w.to_ident()]),
+                        args: vec![],
+                        over: None,
+                        distinct: false,
+                        special: true,
+                    }))
+                }
+                Keyword::CURRENT_TIMESTAMP
+                | Keyword::CURRENT_TIME
+                | Keyword::CURRENT_DATE
+                | Keyword::LOCALTIME
+                | Keyword::LOCALTIMESTAMP => {
+                    parser.parse_time_functions(ObjectName(vec![w.to_ident()]))
+                }
+                Keyword::CASE => parser.parse_case_expr(),
+                Keyword::CAST => parser.parse_cast_expr(),
+                Keyword::TRY_CAST => parser.parse_try_cast_expr(),
+                Keyword::SAFE_CAST => parser.parse_safe_cast_expr(),
+                Keyword::EXISTS => parser.parse_exists_expr(false),
+                Keyword::EXTRACT => parser.parse_extract_expr(),
+                Keyword::CEIL => parser.parse_ceil_floor_expr(true),
+                Keyword::FLOOR => parser.parse_ceil_floor_expr(false),
+                Keyword::POSITION => parser.parse_position_expr(),
+                Keyword::SUBSTRING => parser.parse_substring_expr(),
+                Keyword::OVERLAY => parser.parse_overlay_expr(),
+                Keyword::TRIM => parser.parse_trim_expr(),
+                Keyword::INTERVAL => parser.parse_interval(),
+                Keyword::LISTAGG => parser.parse_listagg_expr(),
+                // Treat ARRAY[1,2,3] as an array [1,2,3], otherwise try as subquery or a function call
+                Keyword::ARRAY if parser.peek_token() == Token::LBracket => {
+                    some_q!(parser.expect_token(&Token::LBracket));
+                    parser.parse_array_expr(true)
+                }
+                Keyword::ARRAY
+                    if parser.peek_token() == Token::LParen =>
+                {
+                    some_q!(parser.expect_token(&Token::LParen));
+                    parser.parse_array_subquery()
+                }
+                Keyword::ARRAY_AGG => parser.parse_array_agg_expr(),
+                Keyword::NOT => parser.parse_not(),
+                // Here `w` is a word, check if it's a part of a multi-part
+                // identifier, a function call, or a simple identifier:
+                _ => match parser.peek_token().token {
+                    Token::LParen | Token::Period => {
+                        let mut id_parts: Vec<Ident> = vec![w.to_ident()];
+                        while parser.consume_token(&Token::Period) {
+                            let next_token = parser.next_token();
+                            match next_token.token {
+                                Token::Word(w) => id_parts.push(w.to_ident()),
+                                _ => {
+                                    return Some(parser.expected("an identifier or a '*' after '.'", next_token));
+                                }
+                            }
+                        }
+
+                        if parser.consume_token(&Token::LParen) {
+                            parser.prev_token();
+                            parser.parse_function(ObjectName(id_parts))
+                        } else {
+                            Ok(Expr::CompoundIdentifier(id_parts))
+                        }
+                    }
+                    // string introducer https://dev.mysql.com/doc/refman/8.0/en/charset-introducer.html
+                    Token::SingleQuotedString(_)
+                    | Token::DoubleQuotedString(_)
+                    | Token::HexStringLiteral(_)
+                        if w.value.starts_with('_') =>
+                    {
+                        Ok(Expr::IntroducedString {
+                            introducer: w.value,
+                            value: some_q!(parser.parse_introduced_string_value()),
+                        })
+                    }
+                    _ => Ok(Expr::Identifier(w.to_ident())),
+                },
+            }, // End of Token::Word
+            // array `[1, 2, 3]`
+            Token::LBracket => parser.parse_array_expr(false),
+            tok @ Token::Minus | tok @ Token::Plus => {
+                let op = if tok == Token::Plus {
+                    UnaryOperator::Plus
+                } else {
+                    UnaryOperator::Minus
+                };
+                Ok(Expr::UnaryOp {
+                    op,
+                    expr: Box::new(some_q!(parser.parse_subexpr(Self::UNARY_PLUS_MINUS_PREC))),
+                })
+            }
+            tok @ Token::DoubleExclamationMark
+            | tok @ Token::PGSquareRoot
+            | tok @ Token::PGCubeRoot
+            | tok @ Token::AtSign
+            | tok @ Token::Tilde => {
+                let op = match tok {
+                    Token::DoubleExclamationMark => UnaryOperator::PGPrefixFactorial,
+                    Token::PGSquareRoot => UnaryOperator::PGSquareRoot,
+                    Token::PGCubeRoot => UnaryOperator::PGCubeRoot,
+                    Token::AtSign => UnaryOperator::PGAbs,
+                    Token::Tilde => UnaryOperator::PGBitwiseNot,
+                    _ => unreachable!(),
+                };
+                Ok(Expr::UnaryOp {
+                    op,
+                    expr: Box::new(some_q!(parser.parse_subexpr(Self::OTHER_OPERATOR_PREC))),
+                })
+            }
+            Token::EscapedStringLiteral(_) =>
+            {
+                parser.prev_token();
+                Ok(Expr::Value(some_q!(parser.parse_value())))
+            }
+            Token::Number(_, _)
+            | Token::SingleQuotedString(_)
+            | Token::DoubleQuotedString(_)
+            | Token::DollarQuotedString(_)
+            | Token::SingleQuotedByteStringLiteral(_)
+            | Token::DoubleQuotedByteStringLiteral(_)
+            | Token::NationalStringLiteral(_)
+            | Token::HexStringLiteral(_) => {
+                parser.prev_token();
+                Ok(Expr::Value(some_q!(parser.parse_value())))
+            }
+            Token::LParen => {
+                let expr =
+                    if parser.parse_keyword(Keyword::SELECT) || parser.parse_keyword(Keyword::WITH) {
+                        parser.prev_token();
+                        Expr::Subquery(Box::new(some_q!(parser.parse_query())))
+                    } else {
+                        let exprs = some_q!(parser.parse_comma_separated(Parser::parse_expr));
+                        match exprs.len() {
+                            0 => unreachable!(), // parse_comma_separated ensures 1 or more
+                            1 => Expr::Nested(Box::new(exprs.into_iter().next().unwrap())),
+                            _ => Expr::Tuple(exprs),
+                        }
+                    };
+                some_q!(parser.expect_token(&Token::RParen));
+                if !parser.consume_token(&Token::Period) {
+                    Ok(expr)
+                } else {
+                    let tok = parser.next_token();
+                    let key = match tok.token {
+                        Token::Word(word) => word.to_ident(),
+                        _ => return Some(parser_err!(format!("Expected identifier, found: {tok}"))),
+                    };
+                    Ok(Expr::CompositeAccess {
+                        expr: Box::new(expr),
+                        key,
+                    })
+                }
+            }
+            Token::Placeholder(_) | Token::Colon => {
+                parser.prev_token();
+                Ok(Expr::Value(some_q!(parser.parse_value())))
+            }
+            _ => parser.expected("an expression:", next_token),
+        });
+
+        Some(if parser.parse_keyword(Keyword::COLLATE) {
+            Ok(Expr::Collate {
+                expr: Box::new(expr),
+                collation: some_q!(parser.parse_object_name()),
+            })
+        } else {
+            Ok(expr)
+        })
     }
 
     fn parse_statement(&self, parser: &mut Parser) -> Option<Result<Statement, ParserError>> {

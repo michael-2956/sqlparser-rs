@@ -1,1 +1,1 @@
-select INTERVAL '1 days' AND '5 hours';
+select ~1 + 2;
