@@ -1,1 +1,1 @@
-select NULL IS DISTINCT FROM NULL IS NULL;
+select not exists (select 1) is not null;

@@ -53,23 +53,13 @@ impl PostgreSqlDialect {
     const OR_PREC: u8 = 10;
 
     fn parse_not(parser: &mut Parser) -> Result<Expr, ParserError> {
-        match parser.peek_token().token {
-            Token::Word(w) => match w.keyword {
-                Keyword::EXISTS => {
-                    let negated = true;
-                    let _ = parser.parse_keyword(Keyword::EXISTS);
-                    parser.parse_exists_expr(negated)
-                }
-                _ => Ok(Expr::UnaryOp {
-                    op: UnaryOperator::Not,
-                    expr: Box::new(parser.parse_subexpr(Self::NOT_PREC)?),
-                }),
-            },
-            _ => Ok(Expr::UnaryOp {
+        Ok(match parser.parse_subexpr(Self::NOT_PREC)? {
+            Expr::Exists { subquery, negated: _ } => Expr::Exists { subquery, negated: true },
+            subexpr => Expr::UnaryOp {
                 op: UnaryOperator::Not,
-                expr: Box::new(parser.parse_subexpr(Self::NOT_PREC)?),
-            }),
-        }
+                expr: Box::new(subexpr),
+            }
+        })
     }
 
     fn parse_position_expr(parser: &mut Parser) -> Result<Expr, ParserError> {
