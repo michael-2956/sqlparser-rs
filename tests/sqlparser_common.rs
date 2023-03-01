@@ -29,8 +29,8 @@ use sqlparser::dialect::{
 use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::{Parser, ParserError};
 use test_utils::{
-    all_dialects, all_dialects_but_pg, assert_eq_vec, expr_from_projection, join, number, only,
-    table, table_alias, TestedDialects,
+    all_dialects, assert_eq_vec, expr_from_projection, join, number, only, table, table_alias,
+    TestedDialects,
 };
 
 #[macro_use]
@@ -1226,6 +1226,23 @@ fn parse_string_agg() {
         }),
         select.projection[0]
     );
+}
+
+macro_rules! dialect_is {
+    ( $dialect: ident is $($dialect_type: ty)|+ ) => {
+        ($($dialect.is::<$dialect_type>())||+)
+    };
+}
+
+/// selects all dialects but PostgreSQL
+pub fn all_dialects_but_pg() -> TestedDialects {
+    TestedDialects {
+        dialects: all_dialects()
+            .dialects
+            .into_iter()
+            .filter(|x| !dialect_is!(x is PostgreSqlDialect))
+            .collect(),
+    }
 }
 
 #[test]
