@@ -1616,15 +1616,15 @@ fn test_json() {
     let select = pg().verified_only_select(sql);
     assert_eq!(
         SelectItem::UnnamedExpr(Expr::JsonAccess {
-            left: Box::new(Expr::Identifier(Ident::new("info"))),
-            operator: JsonOperator::Arrow,
-            right: Box::new(Expr::JsonAccess {
-                left: Box::new(Expr::Value(Value::SingleQuotedString("items".to_string()))),
-                operator: JsonOperator::LongArrow,
-                right: Box::new(Expr::Value(Value::SingleQuotedString(
-                    "product".to_string()
-                )))
+            left: Box::new(Expr::JsonAccess {
+                left: Box::new(Expr::Identifier(Ident::new("info"))),
+                operator: JsonOperator::Arrow,
+                right: Box::new(Expr::Value(Value::SingleQuotedString("items".to_string())))
             }),
+            operator: JsonOperator::LongArrow,
+            right: Box::new(Expr::Value(Value::SingleQuotedString(
+                "product".to_string()
+            )))
         }),
         select.projection[0]
     );
