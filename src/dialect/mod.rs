@@ -93,7 +93,7 @@ pub trait Dialect: Debug + Any {
         // return None to fall back to the default behavior
         None
     }
-    /// Dialect-specific precedence override
+    /// Dialect-specific precedence override (for infix operators)
     fn get_next_precedence(&self, _parser: &Parser) -> Option<Result<u8, ParserError>> {
         // return None to fall back to the default behavior
         None

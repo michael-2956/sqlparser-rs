@@ -1,1 +1,2 @@
-select not exists (select 1) is not null;
+-- select interval 1 + 1 day;
+select interval '1' + '1 day';

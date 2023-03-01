@@ -10,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::ast::{CommentObject, Statement, DataType, Expr, Function, ObjectName, UnaryOperator, Ident, BinaryOperator, JsonOperator};
+use crate::ast::{CommentObject, Statement, DataType, Expr, Function, ObjectName, UnaryOperator, Ident, BinaryOperator, JsonOperator, DateTimeField};
 use crate::dialect::Dialect;
 use crate::keywords::Keyword;
 use crate::parser::{Parser, ParserError};
@@ -93,6 +93,94 @@ impl PostgreSqlDialect {
             high: Box::new(high),
         })
     }
+
+    fn parse_interval(parser: &mut Parser) -> Result<Expr, ParserError> {
+        // The SQL standard allows an optional sign before the value string, but
+        // it is not clear if any implementations support that syntax, so we
+        // don't currently try to parse it. (The sign can instead be included
+        // inside the value string.)
+
+        // The first token in an interval is a string literal which specifies
+        // the duration of the interval.
+        let value = parser.parse_subexpr(Self::OTHER_OPERATOR_PREC)?;
+
+        // Following the string literal is a qualifier which indicates the units
+        // of the duration specified in the string literal.
+        //
+        // Note that PostgreSQL allows omitting the qualifier, so we provide
+        // this more general implementation.
+        let leading_field = match parser.peek_token().token {
+            Token::Word(kw)
+                if [
+                    Keyword::YEAR,
+                    Keyword::MONTH,
+                    Keyword::WEEK,
+                    Keyword::DAY,
+                    Keyword::HOUR,
+                    Keyword::MINUTE,
+                    Keyword::SECOND,
+                    Keyword::CENTURY,
+                    Keyword::DECADE,
+                    Keyword::DOW,
+                    Keyword::DOY,
+                    Keyword::EPOCH,
+                    Keyword::ISODOW,
+                    Keyword::ISOYEAR,
+                    Keyword::JULIAN,
+                    Keyword::MICROSECOND,
+                    Keyword::MICROSECONDS,
+                    Keyword::MILLENIUM,
+                    Keyword::MILLENNIUM,
+                    Keyword::MILLISECOND,
+                    Keyword::MILLISECONDS,
+                    Keyword::NANOSECOND,
+                    Keyword::NANOSECONDS,
+                    Keyword::QUARTER,
+                    Keyword::TIMEZONE,
+                    Keyword::TIMEZONE_HOUR,
+                    Keyword::TIMEZONE_MINUTE,
+                ]
+                .iter()
+                .any(|d| kw.keyword == *d) =>
+            {
+                Some(parser.parse_date_time_field()?)
+            }
+            _ => None,
+        };
+
+        let (leading_precision, last_field, fsec_precision) =
+            if leading_field == Some(DateTimeField::Second) {
+                // SQL mandates special syntax for `SECOND TO SECOND` literals.
+                // Instead of
+                //     `SECOND [(<leading precision>)] TO SECOND[(<fractional seconds precision>)]`
+                // one must use the special format:
+                //     `SECOND [( <leading precision> [ , <fractional seconds precision>] )]`
+                let last_field = None;
+                let (leading_precision, fsec_precision) = parser.parse_optional_precision_scale()?;
+                (leading_precision, last_field, fsec_precision)
+            } else {
+                let leading_precision = parser.parse_optional_precision()?;
+                if parser.parse_keyword(Keyword::TO) {
+                    let last_field = Some(parser.parse_date_time_field()?);
+                    let fsec_precision = if last_field == Some(DateTimeField::Second) {
+                        parser.parse_optional_precision()?
+                    } else {
+                        None
+                    };
+                    (leading_precision, last_field, fsec_precision)
+                } else {
+                    (leading_precision, None, None)
+                }
+            };
+
+        Ok(Expr::Interval {
+            value: Box::new(value),
+            leading_field,
+            leading_precision,
+            last_field,
+            fractional_seconds_precision: fsec_precision,
+        })
+    }
 }
 
 // Returns a successful result if the optional expression is some
@@ -132,8 +220,6 @@ impl Dialect for PostgreSqlDialect {
 
     /// Get the precedence of the next token
     fn get_next_precedence(&self, parser: &Parser) -> Option<Result<u8, ParserError>> {
-        // allow the dialect to override precedence logic
-
         let token = parser.peek_token();
         Some(Ok(match token.token {
             Token::Period => Self::NAME_SEPARATOR_PREC,
@@ -163,15 +249,16 @@ impl Dialect for PostgreSqlDialect {
                 // The precedence of NOT varies depending on keyword that
                 // follows it. If it is followed by IN, BETWEEN, or LIKE,
                 // it takes on the precedence of those tokens. Otherwise it
-                // is not an infix operator, and therefore has its usual
-                // precedence.
+                // is not an infix operator, and therefore has zero
+                // precedence (the parsing is then ended).
                 Token::Word(w) if w.keyword == Keyword::BETWEEN => Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC,
                 Token::Word(w) if w.keyword == Keyword::IN => Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC,
                 Token::Word(w) if w.keyword == Keyword::LIKE => Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC,
                 Token::Word(w) if w.keyword == Keyword::ILIKE => Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC,
                 Token::Word(w) if w.keyword == Keyword::SIMILAR => Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC,
-                _ => Self::NOT_PREC,
+                _ => Self::BASE_PREC,
             },
+
             Token::Word(w) if w.keyword == Keyword::AND => Self::AND_PREC,
             Token::Word(w) if w.keyword == Keyword::OR => Self::OR_PREC,
             
@@ -222,7 +309,7 @@ impl Dialect for PostgreSqlDialect {
         // expression that should parse as the column name "date".
         return_some_ok_if_some!(parser.maybe_parse(|parser| {
             match parser.parse_data_type()? {
-                DataType::Interval => parser.parse_interval(),
+                DataType::Interval => Self::parse_interval(parser),
                 // PostgreSQL allows almost any identifier to be used as custom data type name,
                 // and we support that in `parse_data_type()`. But unlike Postgres we don't
                 // have a list of globally reserved keywords (since they vary across dialects),
@@ -277,7 +364,7 @@ impl Dialect for PostgreSqlDialect {
                 Keyword::SUBSTRING => parser.parse_substring_expr(),
                 Keyword::OVERLAY => parser.parse_overlay_expr(),
                 Keyword::TRIM => parser.parse_trim_expr(),
-                Keyword::INTERVAL => parser.parse_interval(),
+                Keyword::INTERVAL => Self::parse_interval(parser),
                 Keyword::LISTAGG => parser.parse_listagg_expr(),
                 // Treat ARRAY[1,2,3] as an array [1,2,3], otherwise try as subquery or a function call
                 Keyword::ARRAY if parser.peek_token() == Token::LBracket => {
