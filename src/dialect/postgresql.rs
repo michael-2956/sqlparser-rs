@@ -23,33 +23,33 @@ pub struct PostgreSqlDialect {}
 impl PostgreSqlDialect {
     /// Operation precedence reference: https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-PRECEDENCE-TABLE
     const BASE_PREC: u8 = 0;
-    /// .       table/column name separator
+    /// `.`         table/column name separator
     const NAME_SEPARATOR_PREC: u8 = 23;
-    /// ::	    PostgreSQL-style typecast
+    /// `::`	    PostgreSQL-style typecast
     const DOUBLE_COLON_TYPECAST_PREC: u8 = 22;
-    /// [ ]	    array element selection
+    /// `[ ]`	    array element selection
     const BRACKET_ARRAY_ELEMENT_PREC: u8 = 21;
-    /// + -	    unary plus, unary minus. It is supposed that parse_prefix parses
+    /// `+ -`	    unary plus, unary minus. It is supposed that parse_prefix parses
     const UNARY_PLUS_MINUS_PREC: u8 = 20;
-    /// ^	    exponentiation
+    /// `^` 	    exponentiation
     const EXPONENTIATION_PREC: u8 = 19;
-    /// * / %   multiplication, division, modulo
+    /// `* / %`     multiplication, division, modulo
     const MULT_DIV_MOD_PREC: u8 = 18;
-    /// + -	    addition, subtraction
+    /// `+ -`	    addition, subtraction
     const BINARY_ADD_SUB_PREC: u8 = 17;
-    /// (any other operator)	         all other native and user-defined operators
+    /// `(any other operator)`	         all other native and user-defined operators
     const OTHER_OPERATOR_PREC: u8 = 16;
-    /// BETWEEN IN LIKE ILIKE SIMILAR	 range containment, set membership, string matching
+    /// `BETWEEN IN LIKE ILIKE SIMILAR`	 range containment, set membership, string matching
     const BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC: u8 = 15;
-    /// < > = <= >= <>	 	             comparison operators
+    /// `< > = <= >= <>`	 	         comparison operators
     const CMP_PREC: u8 = 14;
-    /// IS ISNULL NOTNULL	 	         IS TRUE, IS FALSE, IS NULL, IS DISTINCT FROM, etc.
+    /// `IS ISNULL NOTNULL`	 	         IS TRUE, IS FALSE, IS NULL, IS DISTINCT FROM, etc.
     const IS_PREC: u8 = 13;
-    /// NOT	    logical negation
+    /// `NOT`   logical negation
     const NOT_PREC: u8 = 12;
-    /// AND	    logical conjunction
+    /// `AND`   logical conjunction
     const AND_PREC: u8 = 11;
-    /// OR	    logical disjunction
+    /// `OR`    logical disjunction
     const OR_PREC: u8 = 10;
 
     fn parse_not(parser: &mut Parser) -> Result<Expr, ParserError> {
