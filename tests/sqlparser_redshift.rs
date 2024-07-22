@@ -16,6 +16,7 @@ mod test_utils;
 use test_utils::*;
 
 use sqlparser::ast::*;
+use sqlparser::dialect::GenericDialect;
 use sqlparser::dialect::RedshiftSqlDialect;
 
 #[test]
@@ -44,8 +45,9 @@ fn test_square_brackets_over_db_schema_table_name() {
                 ]),
                 alias: None,
                 args: None,
-                columns_definition: None,
                 with_hints: vec![],
+                version: None,
+                partitions: vec![],
             },
             joins: vec![],
         }
@@ -89,8 +91,9 @@ fn test_double_quotes_over_db_schema_table_name() {
                 ]),
                 alias: None,
                 args: None,
-                columns_definition: None,
                 with_hints: vec![],
+                version: None,
+                partitions: vec![],
             },
             joins: vec![],
         }
@@ -109,14 +112,15 @@ fn parse_delimited_identifiers() {
             name,
             alias,
             args,
-            columns_definition,
             with_hints,
+            version,
+            partitions: _,
         } => {
             assert_eq!(vec![Ident::with_quote('"', "a table")], name.0);
             assert_eq!(Ident::with_quote('"', "alias"), alias.unwrap().name);
             assert!(args.is_none());
-            assert!(columns_definition.is_none());
             assert!(with_hints.is_empty());
+            assert!(version.is_none());
         }
         _ => panic!("Expecting TableFactor::Table"),
     }
@@ -133,9 +137,12 @@ fn parse_delimited_identifiers() {
         &Expr::Function(Function {
             name: ObjectName(vec![Ident::with_quote('"', "myfun")]),
             args: vec![],
+            null_treatment: None,
+            filter: None,
             over: None,
             distinct: false,
             special: false,
+            order_by: vec![],
         }),
         expr_from_projection(&select.projection[1]),
     );
@@ -264,6 +271,14 @@ fn parse_similar_to() {
 fn redshift() -> TestedDialects {
     TestedDialects {
         dialects: vec![Box::new(RedshiftSqlDialect {})],
+        options: None,
+    }
+}
+
+fn redshift_and_generic() -> TestedDialects {
+    TestedDialects {
+        dialects: vec![Box::new(RedshiftSqlDialect {}), Box::new(GenericDialect {})],
+        options: None,
     }
 }
 
@@ -278,70 +293,7 @@ fn test_sharp() {
 }
 
 #[test]
-fn test_parse_pg_get_late_binding_view_cols() {
-    let sql = "select * from pg_get_late_binding_view_cols() some_name_cols(view_schema name, view_name name, col_name name)";
-    let expected = "SELECT * FROM pg_get_late_binding_view_cols() some_name_cols(view_schema name, view_name name, col_name name)";
-    redshift().one_statement_parses_to(sql, expected);
-
-    let select = redshift().verified_only_select(expected);
-    assert_eq!(
-        TableFactor::Table {
-            name: ObjectName(vec![Ident::new("pg_get_late_binding_view_cols")],),
-            args: Some(vec![]),
-            alias: None,
-            columns_definition: Some(TableAliasDefinition {
-                name: Ident::new("some_name_cols"),
-                args: vec![
-                    IdentPair(Ident::new("view_schema"), Ident::new("name")),
-                    IdentPair(Ident::new("view_name"), Ident::new("name")),
-                    IdentPair(Ident::new("col_name"), Ident::new("name"))
-                ]
-            }),
-            with_hints: vec![]
-        },
-        select.from[0].relation
-    );
-}
-
-#[test]
-fn test_parse_pg_get_cols() {
-    let sql =
-        "SELECT * FROM pg_get_cols() some_name(view_schema name, view_name name, col_name name)";
-    redshift().verified_stmt(sql);
-}
-
-#[test]
-fn test_parse_pg_get_grantee_by_iam_role() {
-    let sql = "SELECT grantee, grantee_type, cmd_type FROM pg_get_grantee_by_iam_role('arn:aws:iam::123456789012:role/Redshift-S3-Write') res_grantee(grantee text, grantee_type text, cmd_type text)";
-    redshift().verified_stmt(sql);
-}
-
-#[test]
-fn test_parse_pg_get_iam_role_by_user() {
-    let sql = "SELECT username, iam_role, cmd FROM pg_get_iam_role_by_user('reg_user1') res_iam_role(username text, iam_role text, cmd text)";
-    redshift().verified_stmt(sql);
-}
-
-#[test]
-fn test_parse_pg_get_late_binding_view_cols_in_select() {
-    let sql = "SELECT pg_get_late_binding_view_cols()";
-    redshift().verified_stmt(sql);
-}
-
-#[test]
-fn test_parse_pg_get_cols_in_select() {
-    let sql = "SELECT pg_get_cols()";
-    redshift().verified_stmt(sql);
-}
-
-#[test]
-fn test_parse_pg_get_grantee_by_iam_role_in_select() {
-    let sql = "SELECT pg_get_grantee_by_iam_role()";
-    redshift().verified_stmt(sql);
-}
-
-#[test]
-fn test_parse_pg_get_iam_role_by_user_in_select() {
-    let sql = "SELECT pg_get_iam_role_by_user()";
-    redshift().verified_stmt(sql);
+fn test_create_view_with_no_schema_binding() {
+    redshift_and_generic()
+        .verified_stmt("CREATE VIEW myevent AS SELECT eventname FROM event WITH NO SCHEMA BINDING");
 }

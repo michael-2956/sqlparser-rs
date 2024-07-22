@@ -15,6 +15,12 @@ use crate::dialect::Dialect;
 use crate::keywords::Keyword;
 use crate::parser::{Parser, ParserError};
 
+/// A [`Dialect`] for [SQLite](https://www.sqlite.org)
+///
+/// This dialect allows columns in a
+/// [`CREATE TABLE`](https://sqlite.org/lang_createtable.html) statement with no
+/// type specified, as in `CREATE TABLE t1 (a)`. In the AST, these columns will
+/// have the data type [`Unspecified`](crate::ast::DataType::Unspecified).
 #[derive(Debug)]
 pub struct SQLiteDialect {}
 
@@ -28,15 +34,23 @@ impl Dialect for SQLiteDialect {
 
     fn is_identifier_start(&self, ch: char) -> bool {
         // See https://www.sqlite.org/draft/tokenreq.html
-        ('a'..='z').contains(&ch)
-            || ('A'..='Z').contains(&ch)
+        ch.is_ascii_lowercase()
+            || ch.is_ascii_uppercase()
             || ch == '_'
             || ch == '$'
             || ('\u{007f}'..='\u{ffff}').contains(&ch)
     }
 
+    fn supports_filter_during_aggregation(&self) -> bool {
+        true
+    }
+
+    fn supports_start_transaction_modifier(&self) -> bool {
+        true
+    }
+
     fn is_identifier_part(&self, ch: char) -> bool {
-        self.is_identifier_start(ch) || ('0'..='9').contains(&ch)
+        self.is_identifier_start(ch) || ch.is_ascii_digit()
     }
 
     fn parse_statement(&self, parser: &mut Parser) -> Option<Result<Statement, ParserError>> {
@@ -46,5 +60,9 @@ impl Dialect for SQLiteDialect {
         } else {
             None
         }
+    }
+
+    fn supports_in_empty_list(&self) -> bool {
+        true
     }
 }

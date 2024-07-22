@@ -24,7 +24,9 @@ use serde::{Deserialize, Serialize};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::value::escape_single_quote_string;
-use crate::ast::{display_comma_separated, display_separated, DataType, Expr, Ident, ObjectName};
+use crate::ast::{
+    display_comma_separated, display_separated, DataType, Expr, Ident, ObjectName, SequenceOptions,
+};
 use crate::tokenizer::Token;
 
 /// An `ALTER TABLE` (`Statement::AlterTable`) operation
@@ -43,6 +45,18 @@ pub enum AlterTableOperation {
         /// <column_def>.
         column_def: ColumnDef,
     },
+    /// `DISABLE ROW LEVEL SECURITY`
+    ///
+    /// Note: this is a PostgreSQL-specific operation.
+    DisableRowLevelSecurity,
+    /// `DISABLE RULE rewrite_rule_name`
+    ///
+    /// Note: this is a PostgreSQL-specific operation.
+    DisableRule { name: Ident },
+    /// `DISABLE TRIGGER [ trigger_name | ALL | USER ]`
+    ///
+    /// Note: this is a PostgreSQL-specific operation.
+    DisableTrigger { name: Ident },
     /// `DROP CONSTRAINT [ IF EXISTS ] <name>`
     DropConstraint {
         if_exists: bool,
@@ -59,6 +73,34 @@ pub enum AlterTableOperation {
     ///
     /// Note: this is a MySQL-specific operation.
     DropPrimaryKey,
+    /// `ENABLE ALWAYS RULE rewrite_rule_name`
+    ///
+    /// Note: this is a PostgreSQL-specific operation.
+    EnableAlwaysRule { name: Ident },
+    /// `ENABLE ALWAYS TRIGGER trigger_name`
+    ///
+    /// Note: this is a PostgreSQL-specific operation.
+    EnableAlwaysTrigger { name: Ident },
+    /// `ENABLE REPLICA RULE rewrite_rule_name`
+    ///
+    /// Note: this is a PostgreSQL-specific operation.
+    EnableReplicaRule { name: Ident },
+    /// `ENABLE REPLICA TRIGGER trigger_name`
+    ///
+    /// Note: this is a PostgreSQL-specific operation.
+    EnableReplicaTrigger { name: Ident },
+    /// `ENABLE ROW LEVEL SECURITY`
+    ///
+    /// Note: this is a PostgreSQL-specific operation.
+    EnableRowLevelSecurity,
+    /// `ENABLE RULE rewrite_rule_name`
+    ///
+    /// Note: this is a PostgreSQL-specific operation.
+    EnableRule { name: Ident },
+    /// `ENABLE TRIGGER [ trigger_name | ALL | USER ]`
+    ///
+    /// Note: this is a PostgreSQL-specific operation.
+    EnableTrigger { name: Ident },
     /// `RENAME TO PARTITION (partition=val)`
     RenamePartitions {
         old_partitions: Vec<Expr>,
@@ -67,7 +109,7 @@ pub enum AlterTableOperation {
     /// Add Partitions
     AddPartitions {
         if_not_exists: bool,
-        new_partitions: Vec<Expr>,
+        new_partitions: Vec<Partition>,
     },
     DropPartitions {
         partitions: Vec<Expr>,
@@ -96,6 +138,10 @@ pub enum AlterTableOperation {
         column_name: Ident,
         op: AlterColumnOperation,
     },
+    /// 'SWAP WITH <table_name>'
+    ///
+    /// Note: this is Snowflake specific <https://docs.snowflake.com/en/sql-reference/sql/alter-table>
+    SwapWith { table_name: ObjectName },
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
@@ -113,8 +159,8 @@ impl fmt::Display for AlterTableOperation {
                 new_partitions,
             } => write!(
                 f,
-                "ADD{ine} PARTITION ({})",
-                display_comma_separated(new_partitions),
+                "ADD{ine} {}",
+                display_separated(new_partitions, " "),
                 ine = if *if_not_exists { " IF NOT EXISTS" } else { "" }
             ),
             AlterTableOperation::AddConstraint(c) => write!(f, "ADD {c}"),
@@ -136,6 +182,15 @@ impl fmt::Display for AlterTableOperation {
             }
             AlterTableOperation::AlterColumn { column_name, op } => {
                 write!(f, "ALTER COLUMN {column_name} {op}")
+            }
+            AlterTableOperation::DisableRowLevelSecurity => {
+                write!(f, "DISABLE ROW LEVEL SECURITY")
+            }
+            AlterTableOperation::DisableRule { name } => {
+                write!(f, "DISABLE RULE {name}")
+            }
+            AlterTableOperation::DisableTrigger { name } => {
+                write!(f, "DISABLE TRIGGER {name}")
             }
             AlterTableOperation::DropPartitions {
                 partitions,
@@ -171,6 +226,27 @@ impl fmt::Display for AlterTableOperation {
                 column_name,
                 if *cascade { " CASCADE" } else { "" }
             ),
+            AlterTableOperation::EnableAlwaysRule { name } => {
+                write!(f, "ENABLE ALWAYS RULE {name}")
+            }
+            AlterTableOperation::EnableAlwaysTrigger { name } => {
+                write!(f, "ENABLE ALWAYS TRIGGER {name}")
+            }
+            AlterTableOperation::EnableReplicaRule { name } => {
+                write!(f, "ENABLE REPLICA RULE {name}")
+            }
+            AlterTableOperation::EnableReplicaTrigger { name } => {
+                write!(f, "ENABLE REPLICA TRIGGER {name}")
+            }
+            AlterTableOperation::EnableRowLevelSecurity => {
+                write!(f, "ENABLE ROW LEVEL SECURITY")
+            }
+            AlterTableOperation::EnableRule { name } => {
+                write!(f, "ENABLE RULE {name}")
+            }
+            AlterTableOperation::EnableTrigger { name } => {
+                write!(f, "ENABLE TRIGGER {name}")
+            }
             AlterTableOperation::RenamePartitions {
                 old_partitions,
                 new_partitions,
@@ -202,6 +278,9 @@ impl fmt::Display for AlterTableOperation {
             }
             AlterTableOperation::RenameConstraint { old_name, new_name } => {
                 write!(f, "RENAME CONSTRAINT {old_name} TO {new_name}")
+            }
+            AlterTableOperation::SwapWith { table_name } => {
+                write!(f, "SWAP WITH {table_name}")
             }
         }
     }
@@ -236,6 +315,13 @@ pub enum AlterColumnOperation {
         /// PostgreSQL specific
         using: Option<Expr>,
     },
+    /// `ADD GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY [ ( sequence_options ) ]`
+    ///
+    /// Note: this is a PostgreSQL-specific operation.
+    AddGenerated {
+        generated_as: Option<GeneratedAs>,
+        sequence_options: Option<Vec<SequenceOptions>>,
+    },
 }
 
 impl fmt::Display for AlterColumnOperation {
@@ -255,6 +341,32 @@ impl fmt::Display for AlterColumnOperation {
                 } else {
                     write!(f, "SET DATA TYPE {data_type}")
                 }
+            }
+            AlterColumnOperation::AddGenerated {
+                generated_as,
+                sequence_options,
+            } => {
+                let generated_as = match generated_as {
+                    Some(GeneratedAs::Always) => " ALWAYS",
+                    Some(GeneratedAs::ByDefault) => " BY DEFAULT",
+                    _ => "",
+                };
+
+                write!(f, "ADD GENERATED{generated_as} AS IDENTITY",)?;
+                if let Some(options) = sequence_options {
+                    if !options.is_empty() {
+                        write!(f, " (")?;
+                    }
+
+                    for sequence_option in options {
+                        write!(f, "{sequence_option}")?;
+                    }
+
+                    if !options.is_empty() {
+                        write!(f, " )")?;
+                    }
+                }
+                Ok(())
             }
         }
     }
@@ -480,6 +592,19 @@ impl fmt::Display for IndexType {
         }
     }
 }
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub struct ProcedureParam {
+    pub name: Ident,
+    pub data_type: DataType,
+}
+
+impl fmt::Display for ProcedureParam {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} {}", self.name, self.data_type)
+    }
+}
 
 /// SQL column definition
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
@@ -494,7 +619,14 @@ pub struct ColumnDef {
 
 impl fmt::Display for ColumnDef {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{} {}", self.name, self.data_type)?;
+        if self.data_type == DataType::Unspecified {
+            write!(f, "{}", self.name)?;
+        } else {
+            write!(f, "{} {}", self.name, self.data_type)?;
+        }
+        if let Some(collation) = &self.collation {
+            write!(f, " COLLATE {collation}")?;
+        }
         for option in &self.options {
             write!(f, " {option}")?;
         }
@@ -568,6 +700,16 @@ pub enum ColumnOption {
     CharacterSet(ObjectName),
     Comment(String),
     OnUpdate(Expr),
+    /// `Generated`s are modifiers that follow a column definition in a `CREATE
+    /// TABLE` statement.
+    Generated {
+        generated_as: GeneratedAs,
+        sequence_options: Option<Vec<SequenceOptions>>,
+        generation_expr: Option<Expr>,
+        generation_expr_mode: Option<GeneratedExpressionMode>,
+        /// false if 'GENERATED ALWAYS' is skipped (option starts with AS)
+        generated_keyword: bool,
+    },
 }
 
 impl fmt::Display for ColumnOption {
@@ -603,8 +745,72 @@ impl fmt::Display for ColumnOption {
             CharacterSet(n) => write!(f, "CHARACTER SET {n}"),
             Comment(v) => write!(f, "COMMENT '{}'", escape_single_quote_string(v)),
             OnUpdate(expr) => write!(f, "ON UPDATE {expr}"),
+            Generated {
+                generated_as,
+                sequence_options,
+                generation_expr,
+                generation_expr_mode,
+                generated_keyword,
+            } => {
+                if let Some(expr) = generation_expr {
+                    let modifier = match generation_expr_mode {
+                        None => "",
+                        Some(GeneratedExpressionMode::Virtual) => " VIRTUAL",
+                        Some(GeneratedExpressionMode::Stored) => " STORED",
+                    };
+                    if *generated_keyword {
+                        write!(f, "GENERATED ALWAYS AS ({expr}){modifier}")?;
+                    } else {
+                        write!(f, "AS ({expr}){modifier}")?;
+                    }
+                    Ok(())
+                } else {
+                    // Like Postgres - generated from sequence
+                    let when = match generated_as {
+                        GeneratedAs::Always => "ALWAYS",
+                        GeneratedAs::ByDefault => "BY DEFAULT",
+                        // ExpStored goes with an expression, handled above
+                        GeneratedAs::ExpStored => unreachable!(),
+                    };
+                    write!(f, "GENERATED {when} AS IDENTITY")?;
+                    if sequence_options.is_some() {
+                        let so = sequence_options.as_ref().unwrap();
+                        if !so.is_empty() {
+                            write!(f, " (")?;
+                        }
+                        for sequence_option in so {
+                            write!(f, "{sequence_option}")?;
+                        }
+                        if !so.is_empty() {
+                            write!(f, " )")?;
+                        }
+                    }
+                    Ok(())
+                }
+            }
         }
     }
+}
+
+/// `GeneratedAs`s are modifiers that follow a column option in a `generated`.
+/// 'ExpStored' is used for a column generated from an expression and stored.
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub enum GeneratedAs {
+    Always,
+    ByDefault,
+    ExpStored,
+}
+
+/// `GeneratedExpressionMode`s are modifiers that follow an expression in a `generated`.
+/// No modifier is typically the same as Virtual.
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub enum GeneratedExpressionMode {
+    Virtual,
+    Stored,
 }
 
 fn display_constraint_name(name: &'_ Option<Ident>) -> impl fmt::Display + '_ {
@@ -644,5 +850,63 @@ impl fmt::Display for ReferentialAction {
             ReferentialAction::NoAction => "NO ACTION",
             ReferentialAction::SetDefault => "SET DEFAULT",
         })
+    }
+}
+
+/// SQL user defined type definition
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub enum UserDefinedTypeRepresentation {
+    Composite {
+        attributes: Vec<UserDefinedTypeCompositeAttributeDef>,
+    },
+}
+
+impl fmt::Display for UserDefinedTypeRepresentation {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            UserDefinedTypeRepresentation::Composite { attributes } => {
+                write!(f, "({})", display_comma_separated(attributes))
+            }
+        }
+    }
+}
+
+/// SQL user defined type attribute definition
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub struct UserDefinedTypeCompositeAttributeDef {
+    pub name: Ident,
+    pub data_type: DataType,
+    pub collation: Option<ObjectName>,
+}
+
+impl fmt::Display for UserDefinedTypeCompositeAttributeDef {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} {}", self.name, self.data_type)?;
+        if let Some(collation) = &self.collation {
+            write!(f, " COLLATE {collation}")?;
+        }
+        Ok(())
+    }
+}
+
+/// PARTITION statement used in ALTER TABLE et al. such as in Hive SQL
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub struct Partition {
+    pub partitions: Vec<Expr>,
+}
+
+impl fmt::Display for Partition {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "PARTITION ({})",
+            display_comma_separated(&self.partitions)
+        )
     }
 }

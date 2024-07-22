@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{
-    ColumnDef, FileFormat, HiveDistributionStyle, HiveFormat, ObjectName, OnCommit, Query,
+    ColumnDef, FileFormat, HiveDistributionStyle, HiveFormat, Ident, ObjectName, OnCommit, Query,
     SqlOption, Statement, TableConstraint,
 };
 use crate::parser::ParserError;
@@ -65,10 +65,14 @@ pub struct CreateTableBuilder {
     pub like: Option<ObjectName>,
     pub clone: Option<ObjectName>,
     pub engine: Option<String>,
+    pub comment: Option<String>,
+    pub auto_increment_offset: Option<u32>,
     pub default_charset: Option<String>,
     pub collation: Option<String>,
     pub on_commit: Option<OnCommit>,
     pub on_cluster: Option<String>,
+    pub order_by: Option<Vec<Ident>>,
+    pub strict: bool,
 }
 
 impl CreateTableBuilder {
@@ -94,10 +98,14 @@ impl CreateTableBuilder {
             like: None,
             clone: None,
             engine: None,
+            comment: None,
+            auto_increment_offset: None,
             default_charset: None,
             collation: None,
             on_commit: None,
             on_cluster: None,
+            order_by: None,
+            strict: false,
         }
     }
     pub fn or_replace(mut self, or_replace: bool) -> Self {
@@ -193,6 +201,16 @@ impl CreateTableBuilder {
         self
     }
 
+    pub fn comment(mut self, comment: Option<String>) -> Self {
+        self.comment = comment;
+        self
+    }
+
+    pub fn auto_increment_offset(mut self, offset: Option<u32>) -> Self {
+        self.auto_increment_offset = offset;
+        self
+    }
+
     pub fn default_charset(mut self, default_charset: Option<String>) -> Self {
         self.default_charset = default_charset;
         self
@@ -210,6 +228,16 @@ impl CreateTableBuilder {
 
     pub fn on_cluster(mut self, on_cluster: Option<String>) -> Self {
         self.on_cluster = on_cluster;
+        self
+    }
+
+    pub fn order_by(mut self, order_by: Option<Vec<Ident>>) -> Self {
+        self.order_by = order_by;
+        self
+    }
+
+    pub fn strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
         self
     }
 
@@ -235,10 +263,14 @@ impl CreateTableBuilder {
             like: self.like,
             clone: self.clone,
             engine: self.engine,
+            comment: self.comment,
+            auto_increment_offset: self.auto_increment_offset,
             default_charset: self.default_charset,
             collation: self.collation,
             on_commit: self.on_commit,
             on_cluster: self.on_cluster,
+            order_by: self.order_by,
+            strict: self.strict,
         }
     }
 }
@@ -271,10 +303,14 @@ impl TryFrom<Statement> for CreateTableBuilder {
                 like,
                 clone,
                 engine,
+                comment,
+                auto_increment_offset,
                 default_charset,
                 collation,
                 on_commit,
                 on_cluster,
+                order_by,
+                strict,
             } => Ok(Self {
                 or_replace,
                 temporary,
@@ -296,10 +332,14 @@ impl TryFrom<Statement> for CreateTableBuilder {
                 like,
                 clone,
                 engine,
+                comment,
+                auto_increment_offset,
                 default_charset,
                 collation,
                 on_commit,
                 on_cluster,
+                order_by,
+                strict,
             }),
             _ => Err(ParserError::ParserError(format!(
                 "Expected create table statement, but received: {stmt}"

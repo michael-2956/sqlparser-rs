@@ -25,6 +25,7 @@ use sqlparser::ast::TableFactor::Table;
 use sqlparser::ast::*;
 
 use sqlparser::dialect::ClickHouseDialect;
+use sqlparser::dialect::GenericDialect;
 
 #[test]
 fn parse_map_access_expr() {
@@ -32,7 +33,7 @@ fn parse_map_access_expr() {
     let select = clickhouse().verified_only_select(sql);
     assert_eq!(
         Select {
-            distinct: false,
+            distinct: None,
             top: None,
             projection: vec![UnnamedExpr(MapAccess {
                 column: Box::new(Identifier(Ident {
@@ -49,9 +50,12 @@ fn parse_map_access_expr() {
                             Value::SingleQuotedString("endpoint".to_string())
                         ))),
                     ],
+                    null_treatment: None,
+                    filter: None,
                     over: None,
                     distinct: false,
                     special: false,
+                    order_by: vec![],
                 })],
             })],
             into: None,
@@ -60,17 +64,18 @@ fn parse_map_access_expr() {
                     name: ObjectName(vec![Ident::new("foos")]),
                     alias: None,
                     args: None,
-                    columns_definition: None,
                     with_hints: vec![],
+                    version: None,
+                    partitions: vec![],
                 },
-                joins: vec![]
+                joins: vec![],
             }],
             lateral_views: vec![],
             selection: Some(BinaryOp {
                 left: Box::new(BinaryOp {
                     left: Box::new(Identifier(Ident::new("id"))),
                     op: BinaryOperator::Eq,
-                    right: Box::new(Expr::Value(Value::SingleQuotedString("test".to_string())))
+                    right: Box::new(Expr::Value(Value::SingleQuotedString("test".to_string()))),
                 }),
                 op: BinaryOperator::And,
                 right: Box::new(BinaryOp {
@@ -86,21 +91,25 @@ fn parse_map_access_expr() {
                                     Value::SingleQuotedString("app".to_string())
                                 ))),
                             ],
+                            null_treatment: None,
+                            filter: None,
                             over: None,
                             distinct: false,
                             special: false,
-                        })]
+                            order_by: vec![],
+                        })],
                     }),
                     op: BinaryOperator::NotEq,
-                    right: Box::new(Expr::Value(Value::SingleQuotedString("foo".to_string())))
-                })
+                    right: Box::new(Expr::Value(Value::SingleQuotedString("foo".to_string()))),
+                }),
             }),
-            group_by: vec![],
+            group_by: GroupByExpr::Expressions(vec![]),
             cluster_by: vec![],
             distribute_by: vec![],
             sort_by: vec![],
             having: None,
-            qualify: None
+            named_window: vec![],
+            qualify: None,
         },
         select
     );
@@ -114,7 +123,7 @@ fn parse_array_expr() {
         &Expr::Array(Array {
             elem: vec![
                 Expr::Value(Value::SingleQuotedString("1".to_string())),
-                Expr::Value(Value::SingleQuotedString("2".to_string()))
+                Expr::Value(Value::SingleQuotedString("2".to_string())),
             ],
             named: false,
         }),
@@ -133,9 +142,12 @@ fn parse_array_fn() {
                 FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(Ident::new("x1")))),
                 FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(Ident::new("x2")))),
             ],
+            null_treatment: None,
+            filter: None,
             over: None,
             distinct: false,
             special: false,
+            order_by: vec![],
         }),
         expr_from_projection(only(&select.projection))
     );
@@ -165,14 +177,15 @@ fn parse_delimited_identifiers() {
             name,
             alias,
             args,
-            columns_definition,
             with_hints,
+            version,
+            partitions: _,
         } => {
             assert_eq!(vec![Ident::with_quote('"', "a table")], name.0);
             assert_eq!(Ident::with_quote('"', "alias"), alias.unwrap().name);
             assert!(args.is_none());
-            assert!(columns_definition.is_none());
             assert!(with_hints.is_empty());
+            assert!(version.is_none());
         }
         _ => panic!("Expecting TableFactor::Table"),
     }
@@ -189,9 +202,12 @@ fn parse_delimited_identifiers() {
         &Expr::Function(Function {
             name: ObjectName(vec![Ident::with_quote('"', "myfun")]),
             args: vec![],
+            null_treatment: None,
+            filter: None,
             over: None,
             distinct: false,
             special: false,
+            order_by: vec![],
         }),
         expr_from_projection(&select.projection[1]),
     );
@@ -317,8 +333,64 @@ fn parse_similar_to() {
     chk(true);
 }
 
+#[test]
+fn parse_create_table() {
+    clickhouse().verified_stmt(r#"CREATE TABLE "x" ("a" "int") ENGINE=MergeTree ORDER BY ("x")"#);
+    clickhouse().one_statement_parses_to(
+        r#"CREATE TABLE "x" ("a" "int") ENGINE=MergeTree ORDER BY "x""#,
+        r#"CREATE TABLE "x" ("a" "int") ENGINE=MergeTree ORDER BY ("x")"#,
+    );
+    clickhouse().verified_stmt(
+        r#"CREATE TABLE "x" ("a" "int") ENGINE=MergeTree ORDER BY ("x") AS SELECT * FROM "t" WHERE true"#,
+    );
+}
+
+#[test]
+fn parse_double_equal() {
+    clickhouse().one_statement_parses_to(
+        r#"SELECT foo FROM bar WHERE buz == 'buz'"#,
+        r#"SELECT foo FROM bar WHERE buz = 'buz'"#,
+    );
+}
+
+#[test]
+fn parse_limit_by() {
+    clickhouse_and_generic().verified_stmt(
+        r#"SELECT * FROM default.last_asset_runs_mv ORDER BY created_at DESC LIMIT 1 BY asset"#,
+    );
+    clickhouse_and_generic().verified_stmt(
+        r#"SELECT * FROM default.last_asset_runs_mv ORDER BY created_at DESC LIMIT 1 BY asset, toStartOfDay(created_at)"#,
+    );
+}
+
+#[test]
+fn parse_select_star_except() {
+    clickhouse().verified_stmt("SELECT * EXCEPT (prev_status) FROM anomalies");
+}
+
+#[test]
+fn parse_select_star_except_no_parens() {
+    clickhouse().one_statement_parses_to(
+        "SELECT * EXCEPT prev_status FROM anomalies",
+        "SELECT * EXCEPT (prev_status) FROM anomalies",
+    );
+}
+
+#[test]
+fn parse_select_star_replace() {
+    clickhouse().verified_stmt("SELECT * REPLACE (i + 1 AS i) FROM columns_transformers");
+}
+
 fn clickhouse() -> TestedDialects {
     TestedDialects {
         dialects: vec![Box::new(ClickHouseDialect {})],
+        options: None,
+    }
+}
+
+fn clickhouse_and_generic() -> TestedDialects {
+    TestedDialects {
+        dialects: vec![Box::new(ClickHouseDialect {}), Box::new(GenericDialect {})],
+        options: None,
     }
 }

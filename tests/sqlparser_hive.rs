@@ -20,7 +20,7 @@ use sqlparser::ast::{
     SelectItem, Statement, TableFactor, UnaryOperator, Value,
 };
 use sqlparser::dialect::{GenericDialect, HiveDialect};
-use sqlparser::parser::ParserError;
+use sqlparser::parser::{ParserError, ParserOptions};
 use sqlparser::test_utils::*;
 
 #[test]
@@ -30,6 +30,20 @@ fn parse_table_create() {
 
     hive().verified_stmt(sql);
     hive().verified_stmt(iof);
+}
+
+fn generic(options: Option<ParserOptions>) -> TestedDialects {
+    TestedDialects {
+        dialects: vec![Box::new(GenericDialect {})],
+        options,
+    }
+}
+
+#[test]
+fn parse_describe() {
+    let describe = r#"DESCRIBE namespace.`table`"#;
+    hive().verified_stmt(describe);
+    generic(None).verified_stmt(describe);
 }
 
 #[test]
@@ -111,6 +125,12 @@ fn test_alter_partition() {
 #[test]
 fn test_add_partition() {
     let add = "ALTER TABLE db.table ADD IF NOT EXISTS PARTITION (a = 'asdf', b = 2)";
+    hive().verified_stmt(add);
+}
+
+#[test]
+fn test_add_multiple_partitions() {
+    let add = "ALTER TABLE db.table ADD IF NOT EXISTS PARTITION (`a` = 'asdf', `b` = 2) PARTITION (`a` = 'asdh', `b` = 3)";
     hive().verified_stmt(add);
 }
 
@@ -265,12 +285,8 @@ fn parse_create_function() {
         _ => unreachable!(),
     }
 
-    let generic = TestedDialects {
-        dialects: vec![Box::new(GenericDialect {})],
-    };
-
     assert_eq!(
-        generic.parse_sql_statements(sql).unwrap_err(),
+        generic(None).parse_sql_statements(sql).unwrap_err(),
         ParserError::ParserError(
             "Expected an object type after CREATE, found: FUNCTION".to_string()
         )
@@ -320,14 +336,15 @@ fn parse_delimited_identifiers() {
             name,
             alias,
             args,
-            columns_definition,
             with_hints,
+            version,
+            partitions: _,
         } => {
             assert_eq!(vec![Ident::with_quote('"', "a table")], name.0);
             assert_eq!(Ident::with_quote('"', "alias"), alias.unwrap().name);
             assert!(args.is_none());
-            assert!(columns_definition.is_none());
             assert!(with_hints.is_empty());
+            assert!(version.is_none());
         }
         _ => panic!("Expecting TableFactor::Table"),
     }
@@ -344,9 +361,12 @@ fn parse_delimited_identifiers() {
         &Expr::Function(Function {
             name: ObjectName(vec![Ident::with_quote('"', "myfun")]),
             args: vec![],
+            null_treatment: None,
+            filter: None,
             over: None,
             distinct: false,
             special: false,
+            order_by: vec![],
         }),
         expr_from_projection(&select.projection[1]),
     );
@@ -475,5 +495,6 @@ fn parse_similar_to() {
 fn hive() -> TestedDialects {
     TestedDialects {
         dialects: vec![Box::new(HiveDialect {})],
+        options: None,
     }
 }
