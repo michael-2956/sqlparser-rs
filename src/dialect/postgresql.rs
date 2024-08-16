@@ -540,7 +540,6 @@ impl Dialect for PostgreSqlDialect {
     /// Parse an operator following an expression
     fn parse_infix(&self, parser: &mut Parser, expr: &Expr, precedence: u8) -> Option<Result<Expr, ParserError>> {
         let tok = parser.next_token();
-
         let regular_binary_operator = match &tok.token {
             Token::Spaceship => Some(BinaryOperator::Spaceship),
             Token::DoubleEq => Some(BinaryOperator::Eq),
