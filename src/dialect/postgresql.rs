@@ -10,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::ast::{CommentObject, Statement, DataType, Expr, Function, ObjectName, UnaryOperator, Ident, BinaryOperator, JsonOperator, DateTimeField};
+use crate::ast::{BinaryOperator, CommentObject, DataType, DateTimeField, Expr, Function, Ident, Interval, JsonOperator, ObjectName, Statement, UnaryOperator};
 use crate::dialect::Dialect;
 use crate::keywords::Keyword;
 use crate::parser::{Parser, ParserError};
@@ -54,13 +54,23 @@ impl PostgreSqlDialect {
     const OR_PREC: u8 = 10;
 
     fn parse_not(parser: &mut Parser) -> Result<Expr, ParserError> {
-        Ok(match parser.parse_subexpr(Self::NOT_PREC)? {
-            Expr::Exists { subquery, negated: _ } => Expr::Exists { subquery, negated: true },
-            subexpr => Expr::UnaryOp {
+        match parser.peek_token().token {
+            Token::Word(w) => match w.keyword {
+                Keyword::EXISTS => {
+                    let negated = true;
+                    let _ = parser.parse_keyword(Keyword::EXISTS);
+                    parser.parse_exists_expr(negated)
+                }
+                _ => Ok(Expr::UnaryOp {
+                    op: UnaryOperator::Not,
+                    expr: Box::new(parser.parse_subexpr(Self::NOT_PREC)?),
+                }),
+            },
+            _ => Ok(Expr::UnaryOp {
                 op: UnaryOperator::Not,
-                expr: Box::new(subexpr),
-            }
-        })
+                expr: Box::new(parser.parse_subexpr(Self::NOT_PREC)?),
+            }),
+        }
     }
 
     fn parse_position_expr(parser: &mut Parser) -> Result<Expr, ParserError> {
@@ -77,7 +87,10 @@ impl PostgreSqlDialect {
                 r#in: Box::new(from),
             })
         } else {
-            parser_err!("Position function must include IN keyword".to_string())
+            parser_err!(
+                "Position function must include IN keyword".to_string(),
+                parser.peek_token().location
+            )
         }
     }
 
@@ -174,13 +187,13 @@ impl PostgreSqlDialect {
                 }
             };
 
-        Ok(Expr::Interval {
+        Ok(Expr::Interval(Interval {
             value: Box::new(value),
             leading_field,
             leading_precision,
             last_field,
             fractional_seconds_precision: fsec_precision,
-        })
+        }))
     }
 }
 
@@ -231,6 +244,8 @@ impl Dialect for PostgreSqlDialect {
             Token::Word(w) if w.keyword == Keyword::IN => Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC,
             Token::Word(w) if w.keyword == Keyword::LIKE => Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC,
             Token::Word(w) if w.keyword == Keyword::ILIKE => Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC,
+            Token::Word(w) if w.keyword == Keyword::RLIKE => Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC,
+            Token::Word(w) if w.keyword == Keyword::REGEXP => Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC,
             Token::Word(w) if w.keyword == Keyword::SIMILAR => Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC,
 
             Token::Eq
@@ -252,6 +267,8 @@ impl Dialect for PostgreSqlDialect {
                 Token::Word(w) if w.keyword == Keyword::IN => Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC,
                 Token::Word(w) if w.keyword == Keyword::LIKE => Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC,
                 Token::Word(w) if w.keyword == Keyword::ILIKE => Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC,
+                Token::Word(w) if w.keyword == Keyword::RLIKE => Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC,
+                Token::Word(w) if w.keyword == Keyword::REGEXP => Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC,
                 Token::Word(w) if w.keyword == Keyword::SIMILAR => Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC,
                 _ => Self::BASE_PREC,
             },
@@ -276,6 +293,8 @@ impl Dialect for PostgreSqlDialect {
             | Token::ExclamationMark
             | Token::LongArrow
             | Token::Arrow
+            | Token::Overlap
+            | Token::CaretAt
             | Token::HashArrow
             | Token::HashLongArrow
             | Token::AtArrow
@@ -314,7 +333,7 @@ impl Dialect for PostgreSqlDialect {
                 // name, resulting in `NOT 'a'` being recognized as a `TypedString` instead of
                 // an unary negation `NOT ('a' LIKE 'b')`. To solve this, we don't accept the
                 // `type 'string'` syntax for the custom data types at all.
-                DataType::Custom(..) => parser_err!("dummy"),
+                DataType::Custom(..) => parser_err!("dummy", 0),
                 data_type => Ok(Expr::TypedString {
                     data_type,
                     value: parser.parse_literal_string()?,
@@ -337,9 +356,12 @@ impl Dialect for PostgreSqlDialect {
                     Ok(Expr::Function(Function {
                         name: ObjectName(vec![w.to_ident()]),
                         args: vec![],
+                        null_treatment: None,
+                        filter: None,
                         over: None,
                         distinct: false,
                         special: true,
+                        order_by: vec![],
                     }))
                 }
                 Keyword::CURRENT_TIMESTAMP
@@ -350,6 +372,7 @@ impl Dialect for PostgreSqlDialect {
                     parser.parse_time_functions(ObjectName(vec![w.to_ident()]))
                 }
                 Keyword::CASE => parser.parse_case_expr(),
+                Keyword::CONVERT => parser.parse_convert_expr(),
                 Keyword::CAST => parser.parse_cast_expr(),
                 Keyword::TRY_CAST => parser.parse_try_cast_expr(),
                 Keyword::SAFE_CAST => parser.parse_safe_cast_expr(),
@@ -357,7 +380,9 @@ impl Dialect for PostgreSqlDialect {
                 Keyword::EXTRACT => parser.parse_extract_expr(),
                 Keyword::CEIL => parser.parse_ceil_floor_expr(true),
                 Keyword::FLOOR => parser.parse_ceil_floor_expr(false),
-                Keyword::POSITION => Self::parse_position_expr(parser),
+                Keyword::POSITION if parser.peek_token().token == Token::LParen => {
+                    Self::parse_position_expr(parser)
+                },
                 Keyword::SUBSTRING => parser.parse_substring_expr(),
                 Keyword::OVERLAY => parser.parse_overlay_expr(),
                 Keyword::TRIM => parser.parse_trim_expr(),
@@ -385,6 +410,9 @@ impl Dialect for PostgreSqlDialect {
                             let next_token = parser.next_token();
                             match next_token.token {
                                 Token::Word(w) => id_parts.push(w.to_ident()),
+                                Token::SingleQuotedString(s) => {
+                                    id_parts.push(Ident::with_quote('\'', s))
+                                },
                                 _ => {
                                     return Some(parser.expected("an identifier or a '*' after '.'", next_token));
                                 }
@@ -479,7 +507,12 @@ impl Dialect for PostgreSqlDialect {
                     let tok = parser.next_token();
                     let key = match tok.token {
                         Token::Word(word) => word.to_ident(),
-                        _ => return Some(parser_err!(format!("Expected identifier, found: {tok}"))),
+                        _ => {
+                            return Some(parser_err!(
+                                format!("Expected identifier, found: {tok}"),
+                                tok.location
+                            ))
+                        }
                     };
                     Ok(Expr::CompositeAccess {
                         expr: Box::new(expr),
@@ -487,7 +520,7 @@ impl Dialect for PostgreSqlDialect {
                     })
                 }
             }
-            Token::Placeholder(_) | Token::Colon => {
+            Token::Placeholder(_) | Token::Colon => { //  | Token::AtSign unreachable
                 parser.prev_token();
                 Ok(Expr::Value(some_q!(parser.parse_value())))
             }
@@ -529,6 +562,8 @@ impl Dialect for PostgreSqlDialect {
             Token::ShiftLeft => Some(BinaryOperator::PGBitwiseShiftLeft),
             Token::ShiftRight => Some(BinaryOperator::PGBitwiseShiftRight),
             Token::Sharp => Some(BinaryOperator::PGBitwiseXor),
+            Token::Overlap => Some(BinaryOperator::PGOverlap),
+            Token::CaretAt => Some(BinaryOperator::PGStartsWith),
             Token::Tilde => Some(BinaryOperator::PGRegexMatch),
             Token::TildeAsterisk => Some(BinaryOperator::PGRegexIMatch),
             Token::ExclamationMarkTilde => Some(BinaryOperator::PGRegexNotMatch),
@@ -563,17 +598,36 @@ impl Dialect for PostgreSqlDialect {
                 some_q!(parser.expect_token(&Token::LParen));
                 let right = some_q!(parser.parse_subexpr(precedence));
                 some_q!(parser.expect_token(&Token::RParen));
-
-                let right = match keyword {
-                    Keyword::ALL => Box::new(Expr::AllOp(Box::new(right))),
-                    Keyword::ANY => Box::new(Expr::AnyOp(Box::new(right))),
-                    _ => unreachable!(),
+        
+                if !matches!(
+                    op,
+                    BinaryOperator::Gt
+                        | BinaryOperator::Lt
+                        | BinaryOperator::GtEq
+                        | BinaryOperator::LtEq
+                        | BinaryOperator::Eq
+                        | BinaryOperator::NotEq
+                ) {
+                    return Some(parser_err!(
+                        format!(
+                            "Expected one of [=, >, <, =>, =<, !=] as comparison operator, found: {op}"
+                        ),
+                        tok.location
+                    ));
                 };
 
-                Ok(Expr::BinaryOp {
-                    left: Box::new(expr.to_owned()),
-                    op,
-                    right,
+                Ok(match keyword {
+                    Keyword::ALL => Expr::AllOp {
+                        left: Box::new(expr.to_owned()),
+                        compare_op: op,
+                        right: Box::new(right),
+                    },
+                    Keyword::ANY => Expr::AnyOp {
+                        left: Box::new(expr.to_owned()),
+                        compare_op: op,
+                        right: Box::new(right),
+                    },
+                    _ => unreachable!(),
                 })
             } else {
                 Ok(Expr::BinaryOp {
@@ -602,7 +656,7 @@ impl Dialect for PostgreSqlDialect {
                     } else if parser.parse_keywords(&[Keyword::NOT, Keyword::UNKNOWN]) {
                         Ok(Expr::IsNotUnknown(Box::new(expr.to_owned())))
                     } else if parser.parse_keywords(&[Keyword::DISTINCT, Keyword::FROM]) {
-                        let expr2 = some_q!(parser.parse_subexpr(Self::IS_PREC));
+                        let expr2 = some_q!(parser.parse_subexpr(Self::IS_PREC)); // MAIN has 0 here which is wrong
                         Ok(Expr::IsDistinctFrom(Box::new(expr.to_owned()), Box::new(expr2)))
                     } else if parser.parse_keywords(&[Keyword::NOT, Keyword::DISTINCT, Keyword::FROM])
                     {
@@ -642,10 +696,21 @@ impl Dialect for PostgreSqlDialect {
                 | Keyword::BETWEEN
                 | Keyword::LIKE
                 | Keyword::ILIKE
-                | Keyword::SIMILAR => {
+                | Keyword::SIMILAR
+                | Keyword::REGEXP
+                | Keyword::RLIKE => {
                     parser.prev_token();
                     let negated = parser.parse_keyword(Keyword::NOT);
-                    if parser.parse_keyword(Keyword::IN) {
+                    let regexp = parser.parse_keyword(Keyword::REGEXP);
+                    let rlike = parser.parse_keyword(Keyword::RLIKE);
+                    if regexp || rlike {
+                        Ok(Expr::RLike {
+                            negated,
+                            expr: Box::new(expr.to_owned()),
+                            pattern: Box::new(some_q!(parser.parse_subexpr(Self::BETWEEN_IN_LIKE_ILIKE_SIMILAR_PREC))),
+                            regexp,
+                        })
+                    } else if parser.parse_keyword(Keyword::IN) {
                         parser.parse_in(expr.to_owned(), negated)
                     } else if parser.parse_keyword(Keyword::BETWEEN) {
                         Self::parse_between(parser, expr.to_owned(), negated)
@@ -675,7 +740,10 @@ impl Dialect for PostgreSqlDialect {
                     }
                 }
                 // Can only happen if `get_next_precedence` got out of sync with this function
-                _ => parser_err!(format!("No infix parser for token {:?}", tok.token)),
+                _ => parser_err!(
+                    format!("No infix parser for token {:?}", tok.token),
+                    tok.location
+                ),
             }
         } else if Token::DoubleColon == tok {
             parser.parse_pg_cast(expr.to_owned())
@@ -722,7 +790,10 @@ impl Dialect for PostgreSqlDialect {
             })
         } else {
             // Can only happen if `get_next_precedence` got out of sync with this function
-            parser_err!(format!("No infix parser for token {:?}", tok.token))
+            parser_err!(
+                format!("No infix parser for token {:?}", tok.token),
+                tok.location
+            )
         })
     }
 
